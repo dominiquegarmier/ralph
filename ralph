@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_DIR="$HOME/.config/ralph"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Default configuration
+MAX_ITERATIONS=10
+PROMPT_TEMPLATE="$CONFIG_DIR/prompt.md"
+BEADS_STEALTH=true
+
+# Load config if exists
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+# CLI variables
+TASK_ID=""
+CUSTOM_PROMPT=""
+SHOW_HELP=false
+DO_INIT=false
+
+usage() {
+    cat << EOF
+ralph v$VERSION - The Real Ralph Loop for Claude Code
+
+Usage: ralph [OPTIONS]
+
+Options:
+  -t, --task <id>      Target specific beads task (default: first ready)
+  -m, --max <n>        Maximum iterations (default: $MAX_ITERATIONS)
+  -p, --prompt <file>  Custom prompt template
+  --init               Initialize ralph in current project
+  --no-stealth         Commit beads to repo (default: stealth)
+  -h, --help           Show this help
+
+Examples:
+  ralph                      # Run on first ready task
+  ralph -t bd-a3f8           # Target specific task
+  ralph -m 20                # Run up to 20 iterations
+  ralph --init               # Initialize project
+
+Prerequisites:
+  - Claude Code CLI: npm i -g @anthropic-ai/claude-code
+  - Beads: npm i -g @beads/bd
+  - jq: brew install jq
+
+The Real Ralph Loop:
+  Unlike the built-in ralph-wiggum plugin, this script spawns a FRESH
+  Claude Code session for each iteration, avoiding context rot and
+  maintaining peak AI performance throughout the task.
+
+EOF
+}
+
+init_project() {
+    echo "Initializing ralph in $(pwd)..."
+
+    # Initialize beads in stealth mode by default
+    if [[ ! -d ".beads" ]]; then
+        echo "  Initializing beads..."
+        if [[ "$BEADS_STEALTH" == "true" ]]; then
+            bd init --stealth
+        else
+            bd init
+        fi
+    else
+        echo "  Beads already initialized"
+    fi
+
+    # Create progress.md if not exists
+    if [[ ! -f "progress.md" ]]; then
+        echo "  Creating progress.md..."
+        cat > progress.md << 'EOF'
+# Progress Log
+
+## Codebase Patterns
+<!-- Reusable patterns discovered during development -->
+
+---
+
+## Session Log
+<!-- Each iteration appends its learnings below -->
+EOF
+    else
+        echo "  progress.md already exists"
+    fi
+
+    echo ""
+    echo "Ralph initialized!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Create tasks: bd create \"Task title\" -p 0"
+    echo "  2. Or use /prd skill in Claude Code to generate tasks"
+    echo "  3. Run: ralph"
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -t|--task) TASK_ID="$2"; shift 2 ;;
+        -m|--max) MAX_ITERATIONS="$2"; shift 2 ;;
+        -p|--prompt) CUSTOM_PROMPT="$2"; shift 2 ;;
+        --init) DO_INIT=true; shift ;;
+        --no-stealth) BEADS_STEALTH=false; shift ;;
+        -h|--help) SHOW_HELP=true; shift ;;
+        *) echo "Unknown option: $1"; usage; exit 1 ;;
+    esac
+done
+
+[[ "$SHOW_HELP" == "true" ]] && { usage; exit 0; }
+[[ "$DO_INIT" == "true" ]] && { init_project; exit 0; }
+
+# Use custom prompt if provided
+[[ -n "$CUSTOM_PROMPT" ]] && PROMPT_TEMPLATE="$CUSTOM_PROMPT"
+
+# Verify dependencies
+command -v claude >/dev/null 2>&1 || { echo "Error: claude CLI not found. Install: npm i -g @anthropic-ai/claude-code"; exit 1; }
+command -v bd >/dev/null 2>&1 || { echo "Error: beads (bd) not found. Install: npm i -g @beads/bd"; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq not found. Install: brew install jq"; exit 1; }
+
+# Verify beads initialized
+[[ -d ".beads" ]] || { echo "Error: beads not initialized. Run: ralph --init"; exit 1; }
+
+# Verify prompt template exists
+[[ -f "$PROMPT_TEMPLATE" ]] || { echo "Error: prompt template not found at $PROMPT_TEMPLATE"; exit 1; }
+
+# Verify progress.md exists
+[[ -f "progress.md" ]] || { echo "Error: progress.md not found. Run: ralph --init"; exit 1; }
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║           Ralph Loop - Fresh Context Every Time              ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Max iterations: $MAX_ITERATIONS"
+echo "Prompt template: $PROMPT_TEMPLATE"
+echo ""
+
+ITERATION=0
+while [[ $ITERATION -lt $MAX_ITERATIONS ]]; do
+    ((ITERATION++))
+
+    # Get task to work on
+    if [[ -n "$TASK_ID" ]]; then
+        TASK="$TASK_ID"
+        # Check if specific task is done
+        STATUS=$(bd show "$TASK" --json 2>/dev/null | jq -r '.status // "open"') || STATUS="open"
+        if [[ "$STATUS" == "done" || "$STATUS" == "closed" ]]; then
+            echo "Task $TASK already complete!"
+            exit 0
+        fi
+    else
+        # Get first ready task
+        READY_OUTPUT=$(bd ready --json 2>/dev/null) || READY_OUTPUT="[]"
+        TASK=$(echo "$READY_OUTPUT" | jq -r '.[0].id // empty')
+        if [[ -z "$TASK" ]]; then
+            echo ""
+            echo "════════════════════════════════════════════════════════════════"
+            echo "All tasks complete! No more ready tasks found."
+            echo "════════════════════════════════════════════════════════════════"
+            exit 0
+        fi
+    fi
+
+    # Get task details
+    TASK_JSON=$(bd show "$TASK" --json 2>/dev/null) || { echo "Error: could not fetch task $TASK"; exit 1; }
+    TASK_TITLE=$(echo "$TASK_JSON" | jq -r '.title // "Untitled"')
+    TASK_DESC=$(echo "$TASK_JSON" | jq -r '.description // "No description"')
+
+    echo "────────────────────────────────────────────────────────────────"
+    echo "Iteration $ITERATION/$MAX_ITERATIONS"
+    echo "Task: $TASK"
+    echo "Title: $TASK_TITLE"
+    echo "────────────────────────────────────────────────────────────────"
+    echo ""
+
+    # Build prompt with task context and template
+    PROMPT="# Ralph Loop - Iteration $ITERATION
+
+## Current Task
+- **ID**: $TASK
+- **Title**: $TASK_TITLE
+- **Description**: $TASK_DESC
+
+## Instructions
+$(cat "$PROMPT_TEMPLATE")
+"
+
+    # Clear completion signal from previous iteration (if any)
+    if [[ -f "progress.md" ]]; then
+        # Use temp file for portability (macOS sed -i requires backup extension)
+        grep -v '<promise>COMPLETE</promise>' progress.md > progress.md.tmp 2>/dev/null || true
+        mv progress.md.tmp progress.md 2>/dev/null || true
+    fi
+
+    # CRITICAL: Fresh claude session each iteration
+    # This is the key difference from ralph-wiggum plugin
+    echo "$PROMPT" | claude --dangerously-skip-permissions
+
+    # Check for completion signal
+    if grep -q "<promise>COMPLETE</promise>" progress.md 2>/dev/null; then
+        echo ""
+        echo "✓ Task $TASK marked complete by agent"
+
+        # Mark task as done in beads
+        bd update "$TASK" --status done 2>/dev/null || echo "Warning: could not update task status"
+
+        # Clear task ID to get next ready task on next iteration
+        TASK_ID=""
+    else
+        echo ""
+        echo "→ Task not completed this iteration"
+        echo "  Will retry with fresh context..."
+    fi
+
+    echo ""
+done
+
+echo "════════════════════════════════════════════════════════════════"
+echo "Max iterations ($MAX_ITERATIONS) reached."
+echo ""
+echo "To continue: ralph -m <more-iterations>"
+echo "Check progress.md for details on what was attempted."
+echo "════════════════════════════════════════════════════════════════"
+exit 1
